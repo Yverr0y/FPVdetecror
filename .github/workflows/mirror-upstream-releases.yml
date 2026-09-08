@@ -1,0 +1,33 @@
+name: Mirror upstream releases
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mirror-releases:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: viroone/FPVdetecror
+      FORK_REPO: ${{ github.repository }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Mirror missing upstream releases
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/upstream-releases"
+          gh api --allow-escape-sequences --paginate "/repos/${UPSTREAM_REPO}/releases?per_page=100" --jq '.[] | @base64' | while IFS= read -r encoded; do
+            release="$(printf '%s' "$encoded" | base64 --decode)"; tag="$(jq -r '.tag_name' <<<"$release")"
+            if gh api "/repos/${FORK_REPO}/releases/tags/${tag}" >/dev/null 2>&1; then echo "Skipping ${tag}: already mirrored"; continue; fi
+            title="$(jq -r '.name // .tag_name' <<<"$release")"; draft="$(jq -r '.draft' <<<"$release")"; prerelease="$(jq -r '.prerelease' <<<"$release")"; target="$(jq -r '.target_commitish // empty' <<<"$release")"
+            workdir="$RUNNER_TEMP/upstream-releases/$tag"; mkdir -p "$workdir/assets"; jq -r '.body // ""' <<<"$release" > "$workdir/notes.md"
+            while IFS=$'\t' read -r asset_name asset_url; do [ -n "$asset_name" ] || continue; gh api --allow-escape-sequences -H 'Accept: application/octet-stream' "$asset_url" > "$workdir/assets/$asset_name"; done < <(jq -r '.assets[]? | [.name, .url] | @tsv' <<<"$release")
+            args=("$tag" --repo "$FORK_REPO" --title "$title" --notes-file "$workdir/notes.md"); [ "$draft" = "true" ] && args+=(--draft); [ "$prerelease" = "true" ] && args+=(--prerelease)
+            if gh api "/repos/${FORK_REPO}/git/ref/tags/${tag}" >/dev/null 2>&1; then :; elif [ -n "$target" ] && gh api "/repos/${FORK_REPO}/commits/${target}" >/dev/null 2>&1; then args+=(--target "$target"); else args+=(--target "${{ github.event.repository.default_branch }}"); fi
+            shopt -s nullglob; assets=("$workdir"/assets/*); gh release create "${args[@]}" "${assets[@]}"
+          done
